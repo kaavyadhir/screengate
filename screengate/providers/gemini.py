@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import time
 from typing import Any, Callable, TypeVar
 
@@ -42,6 +43,46 @@ _HEADER = {
 # halfway through and the partial numbers are worse than none.
 RATE_LIMIT_MARKERS = ("429", "rate limit", "resource_exhausted", "quota", "unavailable")
 
+# Google returns 429 for two completely different conditions:
+#
+#   per-minute throttling    - transient, clears in seconds, retrying works
+#   per-DAY quota exhausted  - lasts until a reset hours away, retrying is futile
+#
+# A substring match on "429" or "quota" cannot tell them apart, which is
+# how a deployed request spent ~30s on exponential backoff before failing
+# anyway - on an error whose own payload said "Please retry in 14h18m44s".
+# The response carries the answer, so read it instead of guessing.
+RETRY_DELAY_RE = re.compile(
+    r"retrydelay['\"]?\s*[:=]\s*['\"]?(\d+(?:\.\d+)?)s"   # retryDelay: '51524s'
+    r"|please retry in\s+(?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?",
+    re.I,
+)
+
+# Longest server-requested delay still worth waiting out in-process.
+MAX_WAIT_S = 120.0
+
+
+def _server_requested_delay(msg: str) -> float | None:
+    """How many seconds the API asked us to wait, if it said at all."""
+    m = RETRY_DELAY_RE.search(msg)
+    if not m:
+        return None
+    if m.group(1):
+        return float(m.group(1))
+    hours, mins, secs = m.group(2), m.group(3), m.group(4)
+    if not any((hours, mins, secs)):
+        return None
+    return float(hours or 0) * 3600 + float(mins or 0) * 60 + float(secs or 0)
+
+
+class QuotaExhausted(RuntimeError):
+    """A rate limit that will not clear in any useful timeframe.
+
+    Raised instead of retrying, so callers fail fast and for a stated
+    reason. The semantic layer turns this into a degraded-layer finding
+    rather than a 500; a benchmark stops rather than limping.
+    """
+
 
 def with_retries(fn: Callable[[], T], attempts: int = 5) -> T:
     last: Exception | None = None
@@ -50,10 +91,26 @@ def with_retries(fn: Callable[[], T], attempts: int = 5) -> T:
             return fn()
         except Exception as exc:  # noqa: BLE001 - provider SDK raises broadly
             msg = str(exc).lower()
-            if not any(m in msg for m in RATE_LIMIT_MARKERS) or i == attempts - 1:
+            if not any(m in msg for m in RATE_LIMIT_MARKERS):
+                raise
+
+            wanted = _server_requested_delay(str(exc))
+            if wanted is not None and wanted > MAX_WAIT_S:
+                raise QuotaExhausted(
+                    f"Quota exhausted: the API asks for {wanted / 3600:.1f}h "
+                    "before retrying, so this is not transient throttling and "
+                    "retrying would only waste time. Wait for the reset, or "
+                    "switch SCREENGATE_PROVIDER / SCREENGATE_EMBEDDER."
+                ) from exc
+
+            if i == attempts - 1:
                 raise
             last = exc
+            # Honour a short server-stated delay over our own guess; the
+            # server knows when its window actually reopens.
             delay = min(2**i, 30) + random.uniform(0, 1)
+            if wanted is not None:
+                delay = max(delay, min(wanted, MAX_WAIT_S))
             print(f"  rate limited, retrying in {delay:.1f}s ...", flush=True)
             time.sleep(delay)
     raise last if last else RuntimeError("retry loop exhausted")

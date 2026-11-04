@@ -73,16 +73,67 @@ class SemanticDefense:
     def __init__(self, embedder: Embedder) -> None:
         self.embedder = embedder
         self._intent_names = [n for n, _ in ATTACK_INTENTS]
-        self._intent_vectors = embedder.embed(
-            [t for _, t in ATTACK_INTENTS], kind="document"
-        )
+        self._intent_vectors: list[list[float]] = []
+        self._init_error: Exception | None = None
+
+        # Embedding the reference intents is a network call, so it can
+        # fail for exactly the reasons a request-time call can - expired
+        # quota, a retired model, no connectivity. Letting that raise
+        # here would be the worst version of the bug: the gateway is
+        # constructed at import time, so the whole service would refuse
+        # to start, and the operator would see a stack trace instead of
+        # a running system with one layer degraded.
+        try:
+            self._intent_vectors = embedder.embed(
+                [t for _, t in ATTACK_INTENTS], kind="document"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._init_error = exc
+
+    @property
+    def available(self) -> bool:
+        """False when the layer could not initialise and cannot score."""
+        return bool(self._intent_vectors)
 
     @property
     def reportable(self) -> bool:
-        """False when the backend cannot actually measure meaning."""
-        return bool(getattr(self.embedder, "semantic", False))
+        """False when the backend cannot actually measure meaning.
+
+        Also false when the layer never came up: numbers from a layer
+        that is not running are not results.
+        """
+        return self.available and bool(getattr(self.embedder, "semantic", False))
+
+    def _unavailable(self, segments: list[Segment], exc: Exception) -> InboundResult:
+        return InboundResult(
+            findings=[
+                Finding(
+                    layer=self.name,
+                    rule="layer_unavailable",
+                    severity=Severity.LOW,
+                    trust=Trust.MODEL,
+                    message=(
+                        f"Semantic layer could not run: {type(exc).__name__}. "
+                        "This request was screened by the pattern, spotlighting "
+                        "and outbound layers only; paraphrased attacks may not "
+                        "be detected."
+                    ),
+                    excerpt=str(exc)[:160],
+                    # Reported, but it does not vote on the verdict - see
+                    # max_severity. The gateway being degraded is not
+                    # evidence against the candidate.
+                    operational=True,
+                )
+            ],
+            segments=segments,
+        )
 
     def inspect(self, segments: list[Segment], policy: Policy) -> InboundResult:
+        if not self.available:
+            return self._unavailable(
+                segments, self._init_error or RuntimeError("layer not initialised")
+            )
+
         docs = [s for s in segments if s.trust is Trust.DOCUMENT and s.content.strip()]
         if not docs:
             return InboundResult(findings=[], segments=segments)
@@ -98,7 +149,28 @@ class SemanticDefense:
         if not units:
             return InboundResult(findings=[], segments=segments)
 
-        vectors = self.embedder.embed([u[1] for u in units], kind="query")
+        # A layer that cannot run must not take the gateway down with it.
+        #
+        # This is not hypothetical: the free embedding tier allows 1000
+        # calls a day and this layer spends one per document line, so a
+        # public demo exhausts it routinely. Before this guard, that
+        # turned into a 500 on every single request - the three local
+        # layers, which were working perfectly, never got to run, and
+        # the whole service was dead until a quota reset.
+        #
+        # The choice here is availability over completeness, deliberately.
+        # Failing closed on an embedding outage would reject every
+        # legitimate candidate because a billing quota expired, which is
+        # a worse outcome than running with three layers instead of four
+        # - L1, L2 and L3 are local, deterministic, and still enforcing.
+        # The degradation is recorded as a finding so it appears in the
+        # response, the audit log and the UI rather than being silent:
+        # an undetected loss of a security control is the real danger,
+        # not the loss itself.
+        try:
+            vectors = self.embedder.embed([u[1] for u in units], kind="query")
+        except Exception as exc:  # noqa: BLE001 - any backend failure degrades alike
+            return self._unavailable(segments, exc)
 
         best: tuple[float, str, str] | None = None
         for (seg, line), vec in zip(units, vectors):

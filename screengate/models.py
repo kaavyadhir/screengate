@@ -77,6 +77,16 @@ class Finding(BaseModel):
     score: float | None = Field(
         default=None, description="Similarity score, for the semantic layer."
     )
+    operational: bool = Field(
+        default=False,
+        description=(
+            "True when this reports the state of the gateway rather than "
+            "something about the content - a layer that could not run, for "
+            "example. Operational findings are reported but do not affect "
+            "the verdict: a candidate must not be flagged because a quota "
+            "expired."
+        ),
+    )
 
     def redacted(self, limit: int = 120) -> "Finding":
         if self.excerpt is None:
@@ -188,6 +198,16 @@ class AuditRecord(BaseModel):
 
 
 def max_severity(findings: list[Finding]) -> Severity | None:
-    if not findings:
+    """Highest severity among findings ABOUT THE CONTENT.
+
+    Operational findings are excluded deliberately. A layer that cannot
+    run - an expired embedding quota, say - is a fact about the gateway,
+    not about the candidate, and letting it raise the severity would
+    mark every single applicant for human review because a billing limit
+    was reached. The finding still travels in the response so the
+    degradation stays visible; it simply does not vote on the verdict.
+    """
+    relevant = [f for f in findings if not f.operational]
+    if not relevant:
         return None
-    return max((f.severity for f in findings), key=lambda s: SEVERITY_ORDER[s])
+    return max((f.severity for f in relevant), key=lambda s: SEVERITY_ORDER[s])

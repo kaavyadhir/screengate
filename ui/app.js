@@ -28,8 +28,31 @@ async function analyze(userInput, resume, layers) {
       documents: resume.trim() ? [{ content: resume, label: "resume.pdf" }] : [],
     }),
   });
-  if (!res.ok) throw new Error("Gateway returned " + res.status);
+  if (!res.ok) {
+    // Surface what the server actually said. "Gateway returned 500" sent
+    // someone hunting through logs for a quota error the response body
+    // was already carrying.
+    let detail = "";
+    try {
+      const body = await res.json();
+      detail = body.detail || body.message || "";
+    } catch {
+      /* non-JSON error body; the status alone will have to do */
+    }
+    throw new Error(
+      detail
+        ? `Gateway error ${res.status}: ${detail}`
+        : `Gateway returned ${res.status}. Check the server console.`
+    );
+  }
   return res.json();
+}
+
+/* A layer that could not run is reported as a finding rather than an
+   error, because the request still completed. Surfacing it matters: a
+   silently missing security layer is worse than a visibly missing one. */
+function degradedLayers(data) {
+  return (data.findings || []).filter((f) => f.rule === "layer_unavailable");
 }
 
 function stamp(word) {
@@ -303,9 +326,13 @@ function paintVerdict(data) {
     pills.append(p);
   }
 
+  const degraded = degradedLayers(data);
   meta.textContent =
     `layers run: ${data.layers_run.join(", ") || "none"} · ` +
-    `${data.latency_ms} ms · ${data.request_id}`;
+    `${data.latency_ms} ms · ${data.request_id}` +
+    (degraded.length
+      ? ` · DEGRADED: ${degraded.map((f) => f.layer).join(", ")} unavailable`
+      : "");
 
   band.style.display = "";
   setBand(band, outcome(data), explain(data));
