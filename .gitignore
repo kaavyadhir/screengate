@@ -6,7 +6,11 @@
 # Runtime artefacts
 audit.log
 .chroma/
-bench/heldout/results.json
+
+# NOTE: benchmark result files are deliberately NOT ignored. The README
+# quotes numbers from them, and a claim whose evidence is not in the repo
+# is a claim nobody can check. bench/heldout/results.json was ignored in
+# an earlier revision; that was backwards.
 
 # Python
 __pycache__/

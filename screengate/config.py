@@ -158,6 +158,12 @@ class Settings:
     chroma_path: str = ".chroma"
     log_path: str = "audit.log"
 
+    # Public-demo rate limit, applied per client to /v1/ only. Generous
+    # enough that nobody clicking through the UI will ever see it, tight
+    # enough that a script cannot drain a free-tier quota.
+    rate_limit_events: int = 30
+    rate_limit_window_s: float = 60.0
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -171,4 +177,8 @@ class Settings:
             vector_store=os.getenv("SCREENGATE_VECTOR_STORE", "auto"),
             chroma_path=os.getenv("SCREENGATE_CHROMA_PATH", ".chroma"),
             log_path=os.getenv("SCREENGATE_LOG_PATH", "audit.log"),
+            rate_limit_events=int(os.getenv("SCREENGATE_RATE_LIMIT_EVENTS", "30")),
+            rate_limit_window_s=float(
+                os.getenv("SCREENGATE_RATE_LIMIT_WINDOW_S", "60")
+            ),
         )

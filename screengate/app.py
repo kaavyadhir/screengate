@@ -18,7 +18,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import ingest
+from . import ingest, ratelimit
 from .audit import JsonlAuditLog
 from .config import LayerToggles, Policy, Settings
 from .models import Decision, Finding, GatewayRequest, ScreeningResult, Segment, Trust
@@ -40,6 +40,11 @@ app = FastAPI(
 
 _settings = Settings.from_env()
 _gateway = Gateway(settings=_settings, audit_sink=JsonlAuditLog(_settings.log_path))
+
+# Every /v1/ request can cost a model call, so the public demo is rate
+# limited per client. See screengate/ratelimit.py for why this is here
+# rather than in the reverse proxy.
+ratelimit.install(app, events=_settings.rate_limit_events, window_s=_settings.rate_limit_window_s)
 
 
 class DocumentIn(BaseModel):
