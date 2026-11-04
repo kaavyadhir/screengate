@@ -1,0 +1,31 @@
+# Replace with your domain before deploying. Caddy obtains and renews a
+# Let's Encrypt certificate automatically, so there is no certbot step.
+#
+# For a quick test without a domain, replace the first line with:
+#   :80
+# and remove the tls block implications (HTTP only, no certificate).
+
+screengate.example.com {
+	encode gzip
+
+	# The demo is deliberately public, but the gateway runs a model on
+	# every allowed request. Rate limiting keeps a public demo from
+	# becoming someone else's free inference endpoint.
+	@api path /v1/*
+	rate_limit @api {
+		zone api_zone {
+			key {remote_host}
+			events 30
+			window 1m
+		}
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+
+	reverse_proxy screengate:8000
+}
