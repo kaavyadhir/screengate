@@ -235,6 +235,61 @@ CONFIGS: list[tuple[str, LayerToggles]] = [
 ]
 
 
+def load_baseline(path: Path) -> ConfigResult:
+    """Rebuild the undefended row from a previous run's JSON.
+
+    The live set is a property of the TARGET MODEL, not of the defense
+    configuration being scored, so it does not need regenerating every
+    time a layer is toggled. Reusing it turns a 15-minute run into a
+    3-minute one on a rate-limited free tier.
+
+    The risk is obvious and is why this validates rather than trusting:
+    a baseline from a different model would silently define the wrong
+    live set, and every number scored against it would be wrong while
+    looking fine. Mixing results from two models is exactly the sort of
+    quiet corruption this benchmark exists to avoid.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise SystemExit(f"Could not read {path}: {exc}") from exc
+    except ValueError as exc:
+        raise SystemExit(f"{path} is not valid JSON: {exc}") from exc
+
+    rows = [c for c in data.get("configs", []) if c.get("name") == CONFIGS[0][0]]
+    if not rows:
+        raise SystemExit(
+            f"{path} has no '{CONFIGS[0][0]}' row, so it cannot supply a "
+            "baseline. Produce one with --configs undefended."
+        )
+
+    results = [
+        CaseResult(
+            case_id=c["case_id"],
+            kind=c["kind"],
+            category=c.get("category"),
+            tripwire=c.get("tripwire"),
+            decision=c["decision"],
+            harm_leaked=list(c.get("harm_leaked", [])),
+            rules_fired=list(c.get("rules_fired", [])),
+            excluded=bool(c.get("excluded", False)),
+            trials=int(c.get("trials", 1)),
+            times_leaked=int(c.get("times_leaked", 0)),
+        )
+        for c in rows[0].get("cases", [])
+    ]
+    if not results:
+        raise SystemExit(f"{path} records no cases for the baseline row.")
+
+    print(
+        f"  baseline model: {data.get('model') or 'unrecorded'}"
+        f"   provider: {data.get('provider') or 'unrecorded'}"
+    )
+    return ConfigResult(
+        name=rows[0]["name"], layers=list(rows[0].get("layers", [])), results=results
+    )
+
+
 def run_config(
     gateway: Gateway,
     cases: list[Case],
@@ -243,6 +298,7 @@ def run_config(
     *,
     real_model: bool,
     repeats: int = 1,
+    progress: bool = False,
 ) -> ConfigResult:
     """Run every case under one layer configuration.
 
@@ -264,7 +320,16 @@ def run_config(
     policy = Policy().with_layers(layers)
     results: list[CaseResult] = []
 
-    for case in cases:
+    # A run against a real model is minutes of silence on a free tier, and
+    # silence is indistinguishable from a hang. Print as each case lands so
+    # the operator can see it moving, and can tell a slow run from a stuck
+    # one without reading the process table.
+    import time as _time
+
+    started_at = _time.monotonic()
+    total = len(cases)
+
+    for idx, case in enumerate(cases, 1):
         excluded = case.requires == "real_model" and not real_model
         if excluded:
             results.append(
@@ -314,6 +379,21 @@ def run_config(
                 times_leaked=times_leaked,
             )
         )
+
+        if progress:
+            elapsed = _time.monotonic() - started_at
+            eta = (elapsed / idx) * (total - idx)
+            mark = (
+                "LEAKED" if times_leaked
+                else "blocked" if decision == "block"
+                else "clean"
+            )
+            print(
+                f"  [{idx:>2}/{total}] {case.id:<34} {mark:<8}"
+                f"{f'{times_leaked}/{trials}  ' if trials > 1 else '':>8}"
+                f"{elapsed / 60:4.1f}m elapsed, ~{eta / 60:4.1f}m left",
+                flush=True,
+            )
 
     return ConfigResult(name=name, layers=layers.enabled_names, results=results)
 
@@ -514,6 +594,22 @@ def main(argv: list[str] | None = None) -> int:
             "(repeats-1) x cases extra calls, on the baseline only."
         ),
     )
+    ap.add_argument(
+        "--baseline-from",
+        default=None,
+        metavar="RESULTS.JSON",
+        help=(
+            "Reuse the undefended baseline from an earlier run instead of "
+            "repeating it. Establishing the live set costs ~119 calls and "
+            "15 minutes against a rate-limited free tier, and the answer "
+            "does not change between runs of the same model - so scoring a "
+            "new layer configuration should not have to pay for it again. "
+            "Only the live attacks and the benign controls are then run: a "
+            "non-live attack contributes nothing to the score, so spending "
+            "a call on it is waste. Regenerate this file whenever the "
+            "target model changes."
+        ),
+    )
     args = ap.parse_args(argv)
 
     import dataclasses
@@ -554,9 +650,32 @@ def main(argv: list[str] | None = None) -> int:
                 + ", ".join(repr(c[0]) for c in CONFIGS)
             )
         # The baseline is what every other row is measured against, so it
-        # is always included even when not explicitly asked for.
-        if chosen[0] is not CONFIGS[0]:
+        # is always included even when not explicitly asked for - unless a
+        # previous run's baseline is being reused.
+        if chosen[0] is not CONFIGS[0] and not args.baseline_from:
             chosen = [CONFIGS[0], *chosen]
+
+    loaded_baseline: ConfigResult | None = None
+    if args.baseline_from:
+        loaded_baseline = load_baseline(Path(args.baseline_from))
+        chosen = [c for c in chosen if c[0] != CONFIGS[0][0]]
+        if not chosen:
+            raise SystemExit(
+                "--baseline-from supplies the undefended row, so there is "
+                "nothing left to run. Pick a defended config with --configs."
+            )
+        live = loaded_baseline.live_ids(loaded_baseline)
+        before = len(cases)
+        cases = [c for c in cases if c.kind != "attack" or c.id in live]
+        print(
+            f"Reusing baseline from {args.baseline_from}: "
+            f"{len(live)} live attack(s) of {before - sum(1 for c in cases if c.kind == 'benign')} "
+            f"scored previously."
+        )
+        print(
+            "Skipping attacks that did not work undefended - a defense "
+            "cannot be credited for blocking those.\n"
+        )
 
     scored = sum(
         1 for c in cases if not (c.requires == "real_model" and not real_model)
@@ -565,7 +684,7 @@ def main(argv: list[str] | None = None) -> int:
         1 for c in cases
         if c.kind == "attack" and not (c.requires == "real_model" and not real_model)
     )
-    reps = max(1, args.baseline_repeats)
+    reps = 1 if loaded_baseline else max(1, args.baseline_repeats)
     total_calls = len(chosen) * scored + (reps - 1) * scored_attacks
     if real_model:
         print(f"~{total_calls} model calls for this run.")
@@ -584,9 +703,14 @@ def main(argv: list[str] | None = None) -> int:
             gateway, cases, n, l,
             real_model=real_model,
             repeats=reps if i == 0 else 1,
+            progress=real_model,
         )
         for i, (n, l) in enumerate(chosen)
     ]
+    if loaded_baseline is not None:
+        # Prepend so every table still has the before/after comparison,
+        # without having spent the calls to regenerate it.
+        configs = [loaded_baseline, *configs]
     baseline, full = configs[0], configs[-1]
 
     print(summary_table(configs, semantic_ok))

@@ -153,7 +153,13 @@ class Settings:
     embedder: str = "auto"
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-flash-latest"
-    embedding_model: str = "gemini-embedding-001"
+
+    # Pinned, not `gemini-embedding-001`, because semantic_threshold was
+    # calibrated against THIS model. Cosine distances do not transfer
+    # between embedding models, so changing this silently invalidates the
+    # threshold while every number still looks plausible. Change it only
+    # together with a fresh bench/tune_semantic.py run.
+    embedding_model: str = "gemini-embedding-2"
     vector_store: str = "auto"
     chroma_path: str = ".chroma"
     log_path: str = "audit.log"
@@ -172,7 +178,7 @@ class Settings:
             gemini_api_key=os.getenv("GEMINI_API_KEY"),
             gemini_model=os.getenv("SCREENGATE_GEMINI_MODEL", "gemini-flash-latest"),
             embedding_model=os.getenv(
-                "SCREENGATE_EMBEDDING_MODEL", "gemini-embedding-001"
+                "SCREENGATE_EMBEDDING_MODEL", "gemini-embedding-2"
             ),
             vector_store=os.getenv("SCREENGATE_VECTOR_STORE", "auto"),
             chroma_path=os.getenv("SCREENGATE_CHROMA_PATH", ".chroma"),
