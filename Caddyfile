@@ -1,10 +1,12 @@
-# Replace screengate.example.com with your domain before deploying. Caddy
-# obtains and renews a Let's Encrypt certificate automatically, so there
-# is no certbot step.
+# Site address. Set SITE_ADDRESS in .env on the server.
 #
-# For a quick test without a domain, replace the first line with:
-#   :80
-# Caddy then serves plain HTTP and skips certificate issuance.
+#   SITE_ADDRESS=:80                      bare IP, plain HTTP, no cert
+#   SITE_ADDRESS=screengate.duckdns.org   real hostname, automatic HTTPS
+#
+# Caddy obtains and renews the Let's Encrypt certificate itself, so there
+# is no certbot step and nothing to remember to renew. It needs a real
+# hostname resolving to this server to do it - a free DuckDNS subdomain
+# is enough, and is what the README suggests.
 #
 # NOTE: rate limiting is deliberately NOT done here. Caddy's `rate_limit`
 # directive comes from a third-party module that the standard caddy image
@@ -13,13 +15,18 @@
 # stack from coming up. The limit lives in screengate/ratelimit.py
 # instead, which also means it is covered by the test suite.
 
-screengate.example.com {
+{$SITE_ADDRESS::80} {
 	encode gzip
 
 	header {
 		X-Content-Type-Options nosniff
 		X-Frame-Options DENY
 		Referrer-Policy no-referrer
+		# The demo page is self-contained: no third-party scripts, no
+		# remote fonts, no outbound calls. Saying so explicitly means a
+		# future edit that pulls in a CDN fails visibly here rather than
+		# silently widening what the page may load.
+		Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 		-Server
 	}
 

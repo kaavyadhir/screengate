@@ -1,3 +1,12 @@
+# Runtime dependencies for the gateway and its UI.
+#
+# chromadb is deliberately NOT here; see requirements-vector.txt. It pulls
+# onnxruntime, tokenizers and a large native stack - several hundred
+# megabytes - and installing it exhausts the memory on a 1 GB free-tier
+# instance before the build finishes. The vector store falls back to the
+# in-memory implementation when it is absent (screengate/rag/store.py),
+# which suits a single-node demo anyway: the corpus is small and is
+# rebuilt on boot.
 fastapi>=0.115
 uvicorn[standard]>=0.30
 pydantic>=2.7
@@ -5,4 +14,3 @@ PyYAML>=6.0
 pypdf>=5.0
 python-multipart>=0.0.9
 google-genai>=2.0
-chromadb>=0.5

@@ -1,3 +1,8 @@
+# Local stack: builds the image from this checkout.
+#
+# For the server use docker-compose.prod.yml instead, which pulls a
+# prebuilt image from GHCR rather than compiling on a 1 GB instance.
+
 services:
   screengate:
     build: .
@@ -6,6 +11,9 @@ services:
     environment:
       SCREENGATE_LOG_PATH: /data/audit.log
       SCREENGATE_CHROMA_PATH: /data/chroma
+      # chromadb is not in the image (see requirements.txt), so ask for
+      # the in-memory store rather than letting 'auto' probe for it.
+      SCREENGATE_VECTOR_STORE: ${SCREENGATE_VECTOR_STORE:-memory}
     volumes:
       - screengate-data:/data
     expose:
@@ -17,6 +25,8 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS::80}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

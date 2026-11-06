@@ -1,0 +1,69 @@
+# Production compose: pulls a prebuilt image instead of building.
+#
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Nothing is compiled on the server. The image comes from GHCR, built by
+# .github/workflows/release.yml only after CI passed on main - so what
+# runs in production is exactly what the test suite and the benchmark
+# gate approved.
+#
+# Set IMAGE to pin a specific build for a rollback:
+#   IMAGE=ghcr.io/<owner>/screengate:sha-<commit> docker compose -f docker-compose.prod.yml up -d
+
+services:
+  screengate:
+    image: ${IMAGE:-ghcr.io/kaavyadhir/screengate:latest}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # The public demo runs the deterministic simulator by default.
+      #
+      # Not a shortcut: a shared free-tier key is a shared quota, so a
+      # handful of visitors would exhaust it and everyone after them
+      # would see a degraded gateway. The mock target is instant, free,
+      # identical every time, and demonstrates the layers exactly as
+      # well. The real-model figures live in the README, where they can
+      # be reproduced deliberately rather than burned by accident.
+      SCREENGATE_PROVIDER: ${SCREENGATE_PROVIDER:-mock}
+      # No Chroma in the image, so skip the probe and use memory.
+      SCREENGATE_VECTOR_STORE: memory
+      SCREENGATE_LOG_PATH: /data/audit.log
+      # Tighter than the local default: this port faces the internet.
+      SCREENGATE_RATE_LIMIT_EVENTS: ${SCREENGATE_RATE_LIMIT_EVENTS:-20}
+      SCREENGATE_RATE_LIMIT_WINDOW_S: ${SCREENGATE_RATE_LIMIT_WINDOW_S:-60}
+    volumes:
+      - screengate-data:/data
+    expose:
+      - "8000"
+    # A 1 GB instance running two containers has no room for a runaway
+    # process. Capping here turns "the box froze" into "one container
+    # restarted", which the restart policy then handles.
+    mem_limit: 640m
+    deploy:
+      resources:
+        limits:
+          memory: 640m
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # Bare IP on :80 unless a hostname is set in .env. With a hostname,
+      # Caddy requests and renews the certificate on its own.
+      SITE_ADDRESS: ${SITE_ADDRESS::80}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - screengate
+    mem_limit: 128m
+
+volumes:
+  screengate-data:
+  caddy-data:
+  caddy-config:

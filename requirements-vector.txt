@@ -1,0 +1,14 @@
+# Optional: persistent vector storage via Chroma.
+#
+# Not required. Without it the gateway uses the in-memory store, which is
+# what the deployed demo runs: the retrieval corpus is small, rebuilding
+# it at boot costs milliseconds, and nothing in the threat model needs
+# the index to survive a restart.
+#
+# Install this only where persistence is actually wanted, and expect the
+# install to need roughly 1.5 GB of RAM and several minutes - it brings
+# onnxruntime and a native tokenizer stack with it.
+#
+#     pip install -r requirements.txt -r requirements-vector.txt
+#     SCREENGATE_VECTOR_STORE=chroma
+chromadb>=0.5

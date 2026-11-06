@@ -498,12 +498,73 @@ it in a PDF viewer first and it is an ordinary one-page resume. The
 gateway shows the hidden line, names the technique that hid it, and
 prints the text the model actually reads.
 
-Deploy:
+---
+
+## Deployment
+
+The image is built by GitHub Actions and published to GHCR; the server
+only pulls it. Nothing is compiled in production.
+
+That is not a style preference. The target is a 1 GB free-tier EC2
+instance, where `docker compose build` is slow at best and OOM-killed at
+worst — and a build that only ever runs on one machine is a build nobody
+can audit. Building in CI means deploys take seconds, every running
+container traces back to a commit, and rolling back is pulling an older
+tag.
+
+The release workflow is chained to the test workflow
+(`workflow_run: workflows: ["CI"]`), so an image is never published from
+a commit whose tests failed or whose effective block rate fell below the
+gate. What runs in production is what the benchmark approved.
+
+**On the server**, once Docker and the repo are present:
 
 ```bash
-# set your domain in Caddyfile first; Caddy handles Let's Encrypt itself
-docker compose up -d --build
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
 ```
+
+Updating later is the same two commands. To roll back to a known-good
+build:
+
+```bash
+IMAGE=ghcr.io/<owner>/screengate:sha-<commit> \
+  docker compose -f docker-compose.prod.yml up -d
+```
+
+### Server `.env`
+
+```bash
+SITE_ADDRESS=screengate.example.org   # or :80 for a bare IP, no HTTPS
+SCREENGATE_PROVIDER=mock
+GEMINI_API_KEY=                       # only needed if PROVIDER=gemini
+```
+
+`SITE_ADDRESS` with a real hostname makes Caddy request and renew a
+Let's Encrypt certificate by itself — no certbot, nothing to remember to
+renew. A free DuckDNS subdomain is sufficient.
+
+### Why the public demo runs the simulator
+
+`SCREENGATE_PROVIDER=mock` by default. A shared free-tier key is a shared
+quota: a handful of visitors would exhaust it and everyone afterwards
+would meet a degraded gateway. The mock target is instant, costs nothing,
+behaves identically every time, and exercises all four layers — the
+switches in the UI map onto real policy either way. The real-model
+figures belong in [Results](#results), where they are reproducible
+deliberately rather than burned by accident.
+
+### Resource notes
+
+`chromadb` is not in the runtime image. It brings onnxruntime and a
+native tokenizer stack, needs roughly 1.5 GB to install, and the gateway
+falls back to the in-memory vector store without it — which is the right
+choice for a single node anyway. Install `requirements-vector.txt` and
+set `SCREENGATE_VECTOR_STORE=chroma` if persistence is actually wanted.
+
+Both containers carry memory limits. On a 1 GB box an unbounded process
+takes the whole machine down; capped, one container restarts and the
+restart policy handles it.
 
 ---
 
@@ -529,7 +590,12 @@ screengate/
 │   ├── diagnose.py            # environment + per-case verdicts
 │   └── heldout/               # public-dataset evaluation
 ├── ui/                        # walkthrough + playground + sample PDFs
-└── tests/                     # 113 tests
+├── tests/                     # 113 tests
+├── .github/workflows/
+│   ├── ci.yml                 # tests + benchmark gate on every push
+│   └── release.yml            # builds and publishes the image, after CI
+├── docker-compose.yml         # local: builds from this checkout
+└── docker-compose.prod.yml    # server: pulls the published image
 ```
 
 Stack: Python 3.11, FastAPI, Pydantic v2, Gemini API, ChromaDB, pypdf,
