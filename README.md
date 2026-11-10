@@ -1,7 +1,17 @@
 # ScreenGate
 
+**[Live demo](https://screengate-kaavya.duckdns.org)** — flip the defense
+layers off and watch the attacks land.
+
 A security gateway for LLM applications, demonstrated on a resume-screening
 assistant.
+
+> The live demo runs the deterministic mock target, not a real model. A
+> shared free-tier API key is a shared quota: a few visitors would exhaust
+> it and everyone after them would meet a degraded gateway. All four layers
+> and the PDF concealment scanner behave identically either way — the
+> real-model figures are in [Results](#results) and are reproducible with
+> two commands.
 
 An AI that reads a document cannot reliably distinguish text it should
 *read* from instructions it should *obey*. A candidate can hide a line in
@@ -517,19 +527,51 @@ The release workflow is chained to the test workflow
 a commit whose tests failed or whose effective block rate fell below the
 gate. What runs in production is what the benchmark approved.
 
-**On the server**, once Docker and the repo are present:
+**What is actually deployed.** The live instance runs the container bound
+to localhost with Caddy installed on the host as the TLS terminator, rather
+than the compose stack below:
+
+```bash
+docker run -d --name screengate --restart unless-stopped \
+  -p 127.0.0.1:8000:8000 \
+  -e SCREENGATE_PROVIDER=mock \
+  ghcr.io/kaavyadhir/screengate:latest
+```
+
+Binding to `127.0.0.1` matters: the container is unreachable from the
+internet, and only Caddy — which holds the certificate and sets the
+security headers — can talk to it. `/etc/caddy/Caddyfile` is three lines:
+
+```caddy
+screengate-kaavya.duckdns.org {
+	reverse_proxy 127.0.0.1:8000
+}
+```
+
+Caddy obtains and renews the Let's Encrypt certificate itself. There is no
+certbot step and nothing to remember to renew.
+
+**Updating** is pull, replace, done:
+
+```bash
+docker pull ghcr.io/kaavyadhir/screengate:latest
+docker rm -f screengate && docker run -d --name screengate ...   # as above
+```
+
+**Rolling back** is the same with a pinned tag, since every CI build is
+tagged with its commit:
+
+```bash
+docker run -d --name screengate ... ghcr.io/kaavyadhir/screengate:sha-<commit>
+```
+
+**Or use the compose stack** (`docker-compose.prod.yml`), which runs Caddy
+as a second container instead of a host service. Same architecture, one
+command, and the better choice on a box dedicated to this app:
 
 ```bash
 docker compose -f docker-compose.prod.yml pull
 docker compose -f docker-compose.prod.yml up -d
-```
-
-Updating later is the same two commands. To roll back to a known-good
-build:
-
-```bash
-IMAGE=ghcr.io/<owner>/screengate:sha-<commit> \
-  docker compose -f docker-compose.prod.yml up -d
 ```
 
 ### Server `.env`
